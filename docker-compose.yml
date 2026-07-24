@@ -2,8 +2,9 @@ services:
   dashboard:
     build: .
     container_name: defi-arb-dashboard
+    # Container listens on 80 (Divio-compatible); reach it locally at localhost:8765
     ports:
-      - "8765:8765"
+      - "8765:80"
     restart: unless-stopped
     environment:
       # How often (seconds) the portfolio is re-checked. Default 3600 = hourly.

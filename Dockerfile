@@ -17,8 +17,9 @@ COPY scanner.py dashboard.py monitor.py backtest.py ./
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 
-EXPOSE 8765
+# Divio (and most container PaaS) route HTTP to port 80.
+EXPOSE 80
 
-# Bind to 0.0.0.0 and honor a platform-injected $PORT (Koyeb/Render/Cloud Run/etc.),
-# defaulting to 8765 for plain `docker run`.
-CMD ["sh", "-c", "python dashboard.py --host 0.0.0.0 --port ${PORT:-8765}"]
+# Bind to 0.0.0.0 and honor a platform-injected $PORT, defaulting to 80 (Divio's
+# requirement). Locally, docker-compose maps host 8765 -> container 80.
+CMD ["sh", "-c", "python dashboard.py --host 0.0.0.0 --port ${PORT:-80}"]

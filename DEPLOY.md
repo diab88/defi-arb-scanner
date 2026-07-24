@@ -1,3 +1,48 @@
+# Deploying to Divio
+
+Divio is a Docker-native PaaS: it builds your **Dockerfile** and runs the container.
+This repo is already Divio-ready — the container listens on **port 80** (Divio's requirement).
+
+## Steps
+1. **Create a Divio account** and log in to the Control Panel (<https://control.divio.com>).
+2. **Create a new application** → choose to **connect an existing Git repository**, and point
+   it at `https://github.com/diab88/defi-arb-scanner` (authorize Divio's GitHub access; the repo
+   is private).
+3. Divio detects the **`Dockerfile`** and builds the image. No `docker-compose.yml` is used in the
+   cloud (it's for local dev only) — the container just needs to listen on **port 80**, which it does.
+4. **Set environment variables** (Control Panel → your app → **Env Variables**), for the Test and/or
+   Live environment:
+   ```
+   TELEGRAM_BOT_TOKEN = <your rotated bot token>
+   TELEGRAM_CHAT_ID   = 797814228
+   DEFI_MONITOR_INTERVAL = 3600
+   ```
+   (You do **not** need `PORT` — the image defaults to 80. Divio also injects `DATABASE_URL`,
+   `DEFAULT_STORAGE_DSN`, `DOMAIN`, `SECRET_KEY`; this app ignores them.)
+5. **Deploy** the environment from the Control Panel. Divio gives you a public URL (`*.divioapp.com`
+   or your custom domain).
+
+## ⚠️ Two Divio-specific caveats
+
+**1. Local file storage is NOT persistent on Divio.** Divio containers are stateless, so the
+`data/` folder (portfolio + notifications) **resets on every deploy/restart**. Two options:
+   - **Accept resets** — fine if you just want the live scanner and don't rely on the saved portfolio.
+   - **Persist properly** — move `data/` persistence to a Divio **object-storage** or **database**
+     addon (`DEFAULT_STORAGE_DSN` / `DATABASE_URL`, which Divio injects). This needs a small code
+     change to `dashboard.py`'s load/save functions. Ask and I'll implement it.
+
+**2. No authentication + public URL.** Divio exposes the app on a public domain, and the dashboard
+has no login — anyone with the URL can view/modify your portfolio. Before going live, add auth
+(basic-auth inside the app, or restrict access). Ask and I'll add it.
+
+## Local dev with the Divio-style setup
+The container now listens on 80; locally you still reach it at the same URL because compose maps it:
+```bash
+docker compose up -d --build     # http://localhost:8765  (host 8765 -> container 80)
+```
+
+---
+
 # Deploying to Oracle Cloud (Always Free)
 
 Run the scanner 24/7 on a free Oracle Cloud VM so portfolio monitoring and Telegram
