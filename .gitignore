@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+snapshots/
+monitor-state/
+monitor.out
+data/
+.env
+*.pyc

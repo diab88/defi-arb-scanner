@@ -1,0 +1,22 @@
+services:
+  dashboard:
+    build: .
+    container_name: defi-arb-dashboard
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+    environment:
+      # How often (seconds) the portfolio is re-checked. Default 3600 = hourly.
+      DEFI_MONITOR_INTERVAL: "${DEFI_MONITOR_INTERVAL:-3600}"
+      # Optional Telegram alerts — create a bot via @BotFather, get your chat id, then
+      # set these in a .env file next to this compose file (see README).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+    volumes:
+      # Persist the portfolio + notifications across container restarts
+      - ./data:/app/data
+      # Mount source so code changes apply on `docker compose up -d` without a rebuild
+      - ./scanner.py:/app/scanner.py
+      - ./dashboard.py:/app/dashboard.py
+      - ./monitor.py:/app/monitor.py
+      - ./backtest.py:/app/backtest.py
