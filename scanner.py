@@ -113,6 +113,7 @@ class LendMarket:
     ltv: float              # max loan-to-value (0..1)
     tvl_usd: float
     pool_id: str = ""       # DefiLlama pool id (for the pool page link)
+    age_days: int = 0       # days DefiLlama has tracked the pool (≈ pool age)
 
 
 @dataclass
@@ -133,6 +134,7 @@ class DeployPool:
     apy_spiked: bool = False  # True when 30d avg was used instead of a spiked spot
     apy_pct7d: float = 0.0    # change in APY (pp) over the last 7 days (momentum)
     apy_pct30d: float = 0.0   # change in APY (pp) over the last 30 days
+    age_days: int = 0         # days DefiLlama has tracked the pool (≈ pool age)
 
 
 @dataclass
@@ -189,6 +191,8 @@ class ScanConfig:
     momentum: str = "any"
     # Only show loops where the borrow is incentivized (net negative borrow cost)
     borrow_incentive_only: bool = False
+    # Minimum age (days) that EVERY leg's pool must have existed — filters brand-new pools
+    min_pool_age: int = 0
     limit: int = 25
     # Phase 3 cost model
     position_size: float = 10_000.0  # amount in `position_unit` (USD by default)
@@ -307,6 +311,7 @@ def build_lend_markets(
             ltv=float(ltv),
             tvl_usd=float(tvl),
             pool_id=r.get("pool", ""),
+            age_days=int(meta.get("count") or 0),
         ))
     return markets
 
@@ -341,6 +346,7 @@ def build_deploy_pools(
             pool_id=r.get("pool", ""),
             apy_spot=spot, apy_mean30d=mean30, apy_spiked=spiked,
             apy_pct7d=r.get("apyPct7D") or 0.0, apy_pct30d=r.get("apyPct30D") or 0.0,
+            age_days=int(r.get("count") or 0),
         ))
     return pools
 
@@ -473,6 +479,10 @@ def find_opportunities(
                 deploy = best_deploy_any_chain.get(bclass)
             if deploy is None:
                 continue
+            # Pool-age filter: every leg must have existed at least min_pool_age days.
+            if cfg.min_pool_age > 0 and min(collateral.age_days, borrow.age_days,
+                                            deploy.age_days) < cfg.min_pool_age:
+                continue
 
             target_ltv = collateral.ltv * cfg.ltv_safety
             # Recursive looping amplifies the spread, but only when the deployed asset is
@@ -590,13 +600,15 @@ def recompute_strategy(legs: dict, params: dict,
         symbol=cmeta.get("symbol", "?"),
         supply_apy=coll_supply,
         borrow_apy=0.0, ltv=float(clb.get("ltv") or 0.0),
-        tvl_usd=float(clb.get("totalSupplyUsd") or 0.0), pool_id=coll_id)
+        tvl_usd=float(clb.get("totalSupplyUsd") or 0.0), pool_id=coll_id,
+        age_days=int(cmeta.get("count") or 0))
     borrow = LendMarket(
         project=bmeta.get("project", "?"), chain=bmeta.get("chain", "?"),
         symbol=bmeta.get("symbol", "?"), supply_apy=0.0,
         borrow_apy=(blb.get("apyBaseBorrow") or 0.0) - (blb.get("apyRewardBorrow") or 0.0) * (1.0 - rd),
         ltv=float(blb.get("ltv") or 0.0),
-        tvl_usd=float(blb.get("totalSupplyUsd") or 0.0), pool_id=bor_id)
+        tvl_usd=float(blb.get("totalSupplyUsd") or 0.0), pool_id=bor_id,
+        age_days=int(bmeta.get("count") or 0))
     pred = dmeta.get("predictions") or {}
     dep_apy, dep_spot, dep_mean30, dep_spiked = guarded_apy(dmeta, rd)
     deploy = DeployPool(
@@ -608,7 +620,8 @@ def recompute_strategy(legs: dict, params: dict,
         pred_class=pred.get("predictedClass") or "?",
         pred_prob=float(pred.get("predictedProbability") or 0.0), pool_id=dep_id,
         apy_spot=dep_spot, apy_mean30d=dep_mean30, apy_spiked=dep_spiked,
-        apy_pct7d=dmeta.get("apyPct7D") or 0.0, apy_pct30d=dmeta.get("apyPct30D") or 0.0)
+        apy_pct7d=dmeta.get("apyPct7D") or 0.0, apy_pct30d=dmeta.get("apyPct30D") or 0.0,
+        age_days=int(dmeta.get("count") or 0))
 
     cfg = ScanConfig(
         ltv_safety=params.get("ltv_safety", 0.8),
@@ -676,15 +689,16 @@ def opp_to_dict(o: Opportunity) -> dict:
         "collateral": {"project": o.collateral.project, "chain": o.collateral.chain,
                        "symbol": o.collateral.symbol, "supply_apy": round(o.collateral.supply_apy, 2),
                        "max_ltv": o.collateral.ltv, "tvl_usd": round(o.collateral.tvl_usd),
+                       "age_days": o.collateral.age_days,
                        "pool_id": o.collateral.pool_id, "url": pool_url(o.collateral.pool_id)},
         "borrow": {"project": o.borrow_market.project, "chain": o.borrow_market.chain,
                    "symbol": o.borrow_market.symbol, "borrow_apy": round(o.borrow_market.borrow_apy, 2),
-                   "tvl_usd": round(o.borrow_market.tvl_usd),
+                   "tvl_usd": round(o.borrow_market.tvl_usd), "age_days": o.borrow_market.age_days,
                    "pool_id": o.borrow_market.pool_id, "url": pool_url(o.borrow_market.pool_id)},
         "deploy": {"project": o.deploy.project, "chain": o.deploy.chain,
                    "symbol": o.deploy.symbol, "apy": round(o.deploy.apy, 2),
                    "apy_base": round(o.deploy.apy_base, 2), "apy_reward": round(o.deploy.apy_reward, 2),
-                   "tvl_usd": round(o.deploy.tvl_usd),
+                   "tvl_usd": round(o.deploy.tvl_usd), "age_days": o.deploy.age_days,
                    "pool_id": o.deploy.pool_id, "url": pool_url(o.deploy.pool_id)},
     }
 
@@ -744,6 +758,8 @@ def main() -> int:
                     help="Filter by deploy-pool APY trend: rising / not_falling (default: any)")
     ap.add_argument("--borrow-incentive-only", action="store_true", default=False,
                     help="Only loops where the borrow is incentivized (net-negative borrow cost)")
+    ap.add_argument("--min-pool-age", type=int, default=0,
+                    help="Minimum age in days for every leg's pool (filters brand-new pools; default: 0)")
     ap.add_argument("--position-unit", choices=["USD", "ETH", "BTC", "native"], default="USD",
                     help="Unit for --position-size; 'native' = units of each loop's own collateral (default: USD)")
     ap.add_argument("--position-size", type=float, default=10_000.0,
@@ -766,6 +782,7 @@ def main() -> int:
         pairing=args.pairing, collateral_class=args.collateral_class,
         hide_inferior=args.hide_inferior, max_loops=args.max_loops,
         momentum=args.momentum, borrow_incentive_only=args.borrow_incentive_only,
+        min_pool_age=args.min_pool_age,
         position_size=args.position_size, position_unit=args.position_unit,
         hold_days=args.hold_days, tx_count=args.tx_count, slippage_bps=args.slippage_bps,
     )

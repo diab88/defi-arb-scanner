@@ -364,6 +364,8 @@ PAGE = r"""<!doctype html>
       <select id="momentum"><option value="any">any</option><option value="not_falling">not falling</option><option value="rising">rising</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Only show loops where the borrow is incentivized — net-negative borrow cost, i.e. the protocol pays you to borrow. Rare but high-signal.">Borrow incentive</span>
       <select id="borrow_incentive_only"><option value="0">any</option><option value="1">paid-to-borrow only</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="Minimum age in days that EVERY leg's pool must have existed (from DefiLlama's tracking history). Filters out brand-new, unproven pools. e.g. 90 = only pools live 3+ months.">Min pool age (days)</span>
+      <input id="min_pool_age" type="number" value="0" min="0" step="30" style="width:80px;"></label>
     <label class="ctl">Limit<input id="limit" type="number" value="40" step="5"></label>
     <button id="run" class="go" onclick="runScan()">Run scan</button>
     <label class="ctl" style="flex-direction:row;align-items:center;gap:6px;">
@@ -406,7 +408,7 @@ PAGE = r"""<!doctype html>
 <div class="overlay" id="overlay" onclick="if(event.target===this)closeDetail()"><div class="modal" id="modal"></div></div>
 
 <script>
-const IDS = ["min_net_apy","min_tvl","ltv_safety","reward_discount","max_rating","pairing","collateral_class","hide_inferior","max_loops","momentum","borrow_incentive_only","position_size","hold_days","slippage_bps","same_chain","limit"];
+const IDS = ["min_net_apy","min_tvl","ltv_safety","reward_discount","max_rating","pairing","collateral_class","hide_inferior","max_loops","momentum","borrow_incentive_only","min_pool_age","position_size","hold_days","slippage_bps","same_chain","limit"];
 let timer = null, lastParams = null;
 
 document.getElementById("auto").addEventListener("change", e => {
@@ -441,6 +443,7 @@ async function runScan() {
 function fmtUsd(n){ return "$" + Number(n).toLocaleString(); }
 function localTime(iso){ const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(); }
 function fmtTvl(n){ if(n>=1e9)return "$"+(n/1e9).toFixed(1)+"B"; if(n>=1e6)return "$"+(n/1e6).toFixed(1)+"M"; if(n>=1e3)return "$"+(n/1e3).toFixed(0)+"K"; return "$"+Math.round(n); }
+function fmtAge(d){ if(!d) return "new"; return d>=365 ? (d/365).toFixed(1)+"y" : d+"d"; }
 const link = (t,u) => u ? `<a href="${u}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${t}</a>` : t;
 function momArrow(m){ if(m==="up")return '<span title="APY rising (7d)" style="color:#3fb950">↑</span>'; if(m==="down")return '<span title="APY falling (7d)" style="color:#f85149">↓</span>'; return '<span title="APY flat (7d)" class="muted">→</span>'; }
 
@@ -481,9 +484,9 @@ function render(data) {
       `<td><span class="pill ${r.rating}">${r.rating}</span></td>` +
       `<td class="num">${r.health_factor.toFixed(2)}</td>` +
       `<td class="num">${r.liq_buffer_pct.toFixed(0)}%</td>` +
-      `<td>${link(c.project,c.url)}/${c.chain} <b>${c.symbol}</b> <span class="muted">(${c.supply_apy.toFixed(1)}% · TVL ${fmtTvl(c.tvl_usd)})</span></td>` +
-      `<td>${link(b.project,b.url)} <b>${b.symbol}</b> <span class="muted">(${b.borrow_apy.toFixed(1)}% · TVL ${fmtTvl(b.tvl_usd)})</span>${o.borrow_incentivized ? ' <span title="Paid to borrow — net-negative borrow cost" style="color:#3fb950">⚡</span>' : ''}</td>` +
-      `<td>${link(d.project,d.url)} <b>${d.symbol}</b> <span class="muted">(${d.apy.toFixed(1)}% · TVL ${fmtTvl(d.tvl_usd)})</span> ${momArrow(o.deploy_momentum)}</td>` +
+      `<td>${link(c.project,c.url)}/${c.chain} <b>${c.symbol}</b> <span class="muted">(${c.supply_apy.toFixed(1)}% · TVL ${fmtTvl(c.tvl_usd)} · ${fmtAge(c.age_days)})</span></td>` +
+      `<td>${link(b.project,b.url)} <b>${b.symbol}</b> <span class="muted">(${b.borrow_apy.toFixed(1)}% · TVL ${fmtTvl(b.tvl_usd)} · ${fmtAge(b.age_days)})</span>${o.borrow_incentivized ? ' <span title="Paid to borrow — net-negative borrow cost" style="color:#3fb950">⚡</span>' : ''}</td>` +
+      `<td>${link(d.project,d.url)} <b>${d.symbol}</b> <span class="muted">(${d.apy.toFixed(1)}% · TVL ${fmtTvl(d.tvl_usd)} · ${fmtAge(d.age_days)})</span> ${momArrow(o.deploy_momentum)}</td>` +
       `<td class="warn">${r.warnings.join("; ")}</td>`;
     tb.appendChild(tr);
   });
@@ -671,10 +674,10 @@ function openDetail(o, params, ctx, source) {
 
   let n = 0; const step = () => ++n;
   let steps = "";
-  steps += `<li><span class="step-num">${step()}. Supply collateral.</span> Deposit <code>${supplyTxt}</code> of <b>${c.symbol}</b> into ${lnk(c.project,c.url)} on ${c.chain} (market TVL ${fmtTvl(c.tvl_usd)}). You earn its supply yield (<b>${c.supply_apy.toFixed(1)}%</b>) and it becomes borrowing collateral.</li>`;
-  steps += `<li><span class="step-num">${step()}. Borrow.</span> Borrow <code>${money(borrowAmt)}</code> of <b>${b.symbol}</b> from ${lnk(b.project,b.url)} (market TVL ${fmtTvl(b.tvl_usd)}) — ${(o.target_ltv*100).toFixed(0)}% of collateral value, leaving a <b>${r.liq_buffer_pct.toFixed(0)}%</b> buffer (HF ${r.health_factor.toFixed(2)}). You pay <b>${b.borrow_apy.toFixed(1)}%</b>.</li>`;
+  steps += `<li><span class="step-num">${step()}. Supply collateral.</span> Deposit <code>${supplyTxt}</code> of <b>${c.symbol}</b> into ${lnk(c.project,c.url)} on ${c.chain} (market TVL ${fmtTvl(c.tvl_usd)} · ${fmtAge(c.age_days)} old). You earn its supply yield (<b>${c.supply_apy.toFixed(1)}%</b>) and it becomes borrowing collateral.</li>`;
+  steps += `<li><span class="step-num">${step()}. Borrow.</span> Borrow <code>${money(borrowAmt)}</code> of <b>${b.symbol}</b> from ${lnk(b.project,b.url)} (market TVL ${fmtTvl(b.tvl_usd)} · ${fmtAge(b.age_days)} old) — ${(o.target_ltv*100).toFixed(0)}% of collateral value, leaving a <b>${r.liq_buffer_pct.toFixed(0)}%</b> buffer (HF ${r.health_factor.toFixed(2)}). You pay <b>${b.borrow_apy.toFixed(1)}%</b>.</li>`;
   if (needsSwap) steps += `<li><span class="step-num">${step()}. Swap.</span> Swap borrowed <b>${b.symbol}</b> → <b>${d.symbol}</b> via a DEX aggregator (1inch/Matcha). Similar assets, low slippage — but see basis-risk note.</li>`;
-  steps += `<li><span class="step-num">${step()}. Deploy.</span> Deposit <code>${money(deployAmt)}</code> of <b>${d.symbol}</b> into ${lnk(d.project,d.url)} (pool TVL ${fmtTvl(d.tvl_usd)}), earning <b>${d.apy.toFixed(1)}%</b> — the yield that pays for the loop. Keep your size small vs pool TVL so you can exit cleanly.</li>`;
+  steps += `<li><span class="step-num">${step()}. Deploy.</span> Deposit <code>${money(deployAmt)}</code> of <b>${d.symbol}</b> into ${lnk(d.project,d.url)} (pool TVL ${fmtTvl(d.tvl_usd)} · ${fmtAge(d.age_days)} old), earning <b>${d.apy.toFixed(1)}%</b> — the yield that pays for the loop. Keep your size small vs pool TVL so you can exit cleanly.</li>`;
   if (wantHedge) steps += `<li><span class="step-num">${step()}. Hedge (recommended).</span> ${hedgeInner}</li>`;
   steps += `<li><span class="step-num">${step()}. Monitor & exit.</span> Add this to your Portfolio to auto-track. If ${c.symbol} falls ~${r.liq_buffer_pct.toFixed(0)}% vs the debt you risk liquidation. Unwind in reverse: withdraw from ${d.project}${needsSwap?`, swap ${d.symbol}→${b.symbol}`:""}, repay ${b.project}, withdraw collateral${wantHedge?", and close the futures short":""}.</li>`;
 
@@ -764,6 +767,7 @@ def cfg_from_query(qs: dict) -> scanner.ScanConfig:
         max_loops=g("max_loops", int, 1),
         momentum=g("momentum", str, "any"),
         borrow_incentive_only=g("borrow_incentive_only", lambda v: v == "1", False),
+        min_pool_age=g("min_pool_age", int, 0),
         same_chain=g("same_chain", lambda v: v == "1", True),
         position_size=g("position_size", float, 10_000.0),
         position_unit=g("position_unit", str, "native"),  # dashboard always uses native
