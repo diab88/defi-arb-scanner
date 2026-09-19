@@ -434,9 +434,15 @@ PAGE = r"""<!doctype html>
     <label class="ctl">Min TVL $<input id="lp_min_tvl" type="number" value="5000000" step="1000000"></label>
     <label class="ctl"><span class="tip" data-tip="Minimum trading volume over the last 7 days. Fees only exist where there's real trading — this filters out dead pools.">Min 7d volume $</span><input id="lp_min_vol7d" type="number" value="1000000" step="1000000"></label>
     <label class="ctl"><span class="tip" data-tip="Average daily volume ÷ TVL, as a %. Higher = more fees earned per dollar of liquidity (fee efficiency). >20% is active.">Min vol/TVL %</span><input id="lp_min_vol_tvl" type="number" value="0" step="5"></label>
+    <label class="ctl"><span class="tip" data-tip="Blockchain the pool is on (populated from live data, most common first).">Chain</span>
+      <select id="lp_chain"><option value="all">all</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="DEX / protocol, e.g. uniswap-v3, raydium-amm, orca-dex (populated from live data).">Protocol</span>
+      <select id="lp_project"><option value="all">all</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="Asset kind. 'tokenized stocks' keeps only pools where one leg is an on-chain equity (xStocks / Robinhood — TSLAx, NVDAx, METAx, SPYx…), typically paired with a stablecoin (USDC/USDT/USDG).">Asset kind</span>
+      <select id="lp_asset_kind"><option value="all">all</option><option value="stocks">tokenized stocks 📈</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Pair type by impermanent-loss risk. stable = stablecoin pairs (near-zero IL); correlated = same-class incl. LSTs (low IL); exclude volatile = drop volatile-volatile pairs.">Pair type</span>
       <select id="lp_pair_type"><option value="all">all</option><option value="stable">stablecoin</option><option value="correlated">correlated (low IL)</option><option value="exclude_volatile">exclude volatile-volatile</option></select></label>
-    <label class="ctl"><span class="tip" data-tip="Only pairs whose symbol contains this token, e.g. WETH or USDC.">Token contains</span><input id="lp_token" type="text" value="" placeholder="e.g. WETH" style="width:90px;"></label>
+    <label class="ctl"><span class="tip" data-tip="Only pairs whose symbol contains this token, e.g. WETH or TSLAX.">Token contains</span><input id="lp_token" type="text" value="" placeholder="e.g. TSLAX" style="width:90px;"></label>
     <label class="ctl">Min pool age (days)<input id="lp_min_pool_age" type="number" value="0" min="0" step="30" style="width:80px;"></label>
     <label class="ctl">Limit<input id="lp_limit" type="number" value="40" step="5"></label>
     <button id="lp_run" class="go" onclick="runLpScan()">Run LP scan</button>
@@ -488,9 +494,22 @@ function showView(v) {
     document.getElementById("tab-"+name).classList.toggle("active", v === name);
   });
   if (v === "portfolio") loadPortfolio();
+  if (v === "lp") loadLpMeta();
 }
 
-const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
+const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
+let lpMetaLoaded = false;
+async function loadLpMeta() {
+  if (lpMetaLoaded) return;
+  try {
+    const m = await fetch("/api/lpmeta").then(r => r.json());
+    const fill = (id, vals) => { const el = document.getElementById(id);
+      vals.forEach(v => { const o = document.createElement("option"); o.value = v; o.textContent = v; el.appendChild(o); }); };
+    fill("lp_chain", m.chains || []);
+    fill("lp_project", m.projects || []);
+    lpMetaLoaded = true;
+  } catch (e) { /* dropdowns stay as 'all' only */ }
+}
 async function runLpScan() {
   const btn = document.getElementById("lp_run");
   btn.disabled = true; btn.textContent = "Scanning...";
@@ -525,7 +544,7 @@ function renderLp(data) {
       `<td class="num">${fmtTvl(p.tvl_usd)}</td>` +
       `<td class="num muted">${fmtTvl(p.vol7d_usd)}</td>` +
       `<td class="num">${p.vol_tvl_pct.toFixed(0)}%</td>` +
-      `<td class="muted">${p.pair_type}</td>` +
+      `<td class="muted">${p.is_stock ? '📈 ' : ''}${p.pair_type}</td>` +
       `<td class="num muted">${fmtAge(p.age_days)}</td>` +
       `<td>${momArrow(p.momentum)}</td>` +
       `<td>${link(p.project+"/"+p.chain+" "+p.symbol, p.url)}</td>`;
@@ -953,6 +972,9 @@ def lp_params_from_query(qs: dict) -> dict:
         "min_vol_tvl": g("min_vol_tvl", float, 0.0),
         "pair_type": g("pair_type", str, "all"),
         "token": g("token", str, ""),
+        "chain": g("chain", str, "all"),
+        "project": g("project", str, "all"),
+        "asset_kind": g("asset_kind", str, "all"),
         "min_pool_age": g("min_pool_age", int, 0),
         "limit": g("limit", int, 40),
         "reward_discount": g("reward_discount", float, 0.5),
@@ -991,6 +1013,11 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/lpscan":
             try:
                 self._send(200, json.dumps(scanner.scan_lp(lp_params_from_query(parse_qs(p.query)))))
+            except Exception as e:  # noqa: BLE001
+                self._send(500, json.dumps({"error": str(e)}))
+        elif p.path == "/api/lpmeta":
+            try:
+                self._send(200, json.dumps(scanner.lp_meta()))
             except Exception as e:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(e)}))
         elif p.path == "/api/portfolio":

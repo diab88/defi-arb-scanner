@@ -73,7 +73,8 @@ GAS_USD_PER_TX = {
 }
 DEFAULT_GAS_USD_PER_TX = 0.25  # fallback for chains not listed above
 
-STABLES = {"USDC", "USDT", "DAI", "USDS", "FRAX", "LUSD", "GUSD", "USDE", "CRVUSD", "GHO"}
+STABLES = {"USDC", "USDT", "DAI", "USDS", "FRAX", "LUSD", "GUSD", "USDE", "CRVUSD", "GHO",
+           "USDG", "PYUSD", "USDD", "FDUSD"}
 ETH_LIKE = {"ETH", "WETH", "STETH", "WSTETH", "WEETH", "RETH", "CBETH", "EZETH"}
 BTC_LIKE = {"BTC", "WBTC", "TBTC", "CBBTC", "LBTC"}
 SOL_LIKE = {"SOL", "WSOL", "MSOL", "JITOSOL", "JUPSOL", "BSOL", "INF", "HSOL", "JSOL", "BNSOL"}
@@ -668,35 +669,79 @@ def recompute_strategy(legs: dict, params: dict,
 # Assumed annualized price volatility per asset class, used only for the IL estimate.
 ASSET_VOL = {"STABLE": 0.02, "ETH": 0.60, "BTC": 0.50, "SOL": 0.80}
 DEFAULT_ASSET_VOL = 1.0  # unknown / alt tokens: assume very volatile
+STOCK_VOL = 0.45         # typical single-equity annualized volatility
+
+# Underlying tickers of on-chain tokenized equities (xStocks / Robinhood). On-chain they
+# usually carry an "x" suffix (TSLAx, NVDAx, SPYx). Matching the ticker-before-x avoids the
+# SPX6900 memecoin false positive. Not exhaustive — extend as new tokenized stocks list.
+STOCK_TICKERS = {
+    "AAPL", "ABBV", "ABT", "ACN", "AMD", "AMZN", "APP", "AVGO", "AZN", "BAC", "BRKB",
+    "CMCSA", "COIN", "CRCL", "CRM", "CRWD", "CSCO", "DFDV", "DHR", "DIS", "GLD", "GME",
+    "GOOG", "GOOGL", "HON", "HOOD", "IBM", "INTC", "JNJ", "JPM", "KO", "LIN", "LLY", "MA",
+    "MCD", "MDT", "META", "MRK", "MRVL", "MSFT", "MSTR", "NFLX", "NKE", "NVDA", "NVO",
+    "OPENAI", "ORCL", "PEP", "PFE", "PG", "PLTR", "QQQ", "SPACEX", "SPY", "TBLL",
+    "TMO", "TQQQ", "TSLA", "UNH", "VTI", "WMT", "XOM",
+}
+STOCK_CHAINS = {"robinhood chain"}  # chains whose pools are tokenized equities by nature
 
 
 def pair_parts(symbol: str) -> list[str]:
     return [p for p in (symbol or "").upper().replace("/", "-").split("-") if p]
 
 
+def stock_of(leg: str) -> str | None:
+    """Return the underlying stock ticker if `leg` is a tokenized equity, else None."""
+    u = (leg or "").upper()
+    if u in STOCK_TICKERS:
+        return u
+    if u.endswith("X") and u[:-1] in STOCK_TICKERS:  # xStocks convention: TSLAx -> TSLA
+        return u[:-1]
+    return None
+
+
+def is_stock_pool(symbol: str, chain: str = "") -> bool:
+    if (chain or "").lower() in STOCK_CHAINS:
+        return True
+    return any(stock_of(p) for p in pair_parts(symbol))
+
+
+def _leg_vol(leg: str) -> float:
+    if stock_of(leg):
+        return STOCK_VOL
+    c = asset_class(leg)
+    if c == "STABLE":
+        return 0.02
+    return ASSET_VOL.get(c, DEFAULT_ASSET_VOL)
+
+
 def estimate_il(symbol: str) -> tuple[float, str]:
     """Rough annual impermanent-loss estimate (%) for a 2-asset 50/50 pool.
 
-    Uses the standard small-move approximation IL ≈ σ_ratio² / 8, where σ_ratio is the
-    annualized volatility of the two assets' price ratio, assumed from their asset class.
-    Cross-class pairs assume independence (a conservative upper-ish bound). Returns
-    (il_pct, pair_type). Deliberately approximate — DefiLlama's own il7d is usually empty.
+    Uses the small-move approximation IL ≈ σ_ratio² / 8, with σ from assumed per-leg
+    volatility (stablecoins ~0, stocks ~0.45, ETH/BTC/SOL per class, unknown alts high).
+    Cross-type pairs assume independence (a conservative upper-ish bound). Approximate.
     """
     parts = pair_parts(symbol)
     if len(parts) < 2:
         return 0.0, "single"
     a, b = parts[0], parts[1]
+    sa, sb = stock_of(a), stock_of(b)
     ca, cb = asset_class(a), asset_class(b)
-    if ca == "STABLE" and cb == "STABLE":
-        return 0.05, "stable-stable"
-    if ca and cb and ca == cb:
-        sigma = 0.10  # same volatile class (e.g. LSTs) — track each other closely
-        return round(sigma ** 2 / 8 * 100, 2), "correlated"
-    va = ASSET_VOL.get(ca, DEFAULT_ASSET_VOL)
-    vb = ASSET_VOL.get(cb, DEFAULT_ASSET_VOL)
+    if not (sa or sb):
+        if ca == "STABLE" and cb == "STABLE":
+            return 0.05, "stable-stable"
+        if ca and cb and ca == cb:
+            return round(0.10 ** 2 / 8 * 100, 2), "correlated"
+    va, vb = _leg_vol(a), _leg_vol(b)
     sigma = (va ** 2 + vb ** 2) ** 0.5
-    ptype = "stable-volatile" if (ca == "STABLE" or cb == "STABLE") else "volatile-volatile"
-    return round(sigma ** 2 / 8 * 100, 2), ptype
+    il = round(sigma ** 2 / 8 * 100, 2)
+    if sa or sb:
+        other_stable = (cb == "STABLE") if sa and not sb else (ca == "STABLE") if sb and not sa else False
+        ptype = ("stock-stock" if sa and sb else
+                 "stock-stable" if other_stable else "stock-volatile")
+    else:
+        ptype = "stable-volatile" if (ca == "STABLE" or cb == "STABLE") else "volatile-volatile"
+    return il, ptype
 
 
 def lp_pool_to_dict(r: dict, reward_discount: float) -> dict:
@@ -726,6 +771,7 @@ def lp_pool_to_dict(r: dict, reward_discount: float) -> dict:
         "age_days": int(r.get("count") or 0),
         "momentum": momentum_label(r.get("apyPct7D")),
         "il_risk": r.get("ilRisk", "no"),
+        "is_stock": is_stock_pool(sym, r.get("chain", "")),
         "url": pool_url(r.get("pool", "")),
     }
 
@@ -740,6 +786,8 @@ def scan_lp(params: dict) -> dict:
     pair_type = params.get("pair_type", "all")   # all | stable | correlated | exclude_volatile
     token = (params.get("token") or "").upper()
     chain = params.get("chain", "all")
+    project = params.get("project", "all")       # DEX/protocol, e.g. uniswap-v3
+    asset_kind = params.get("asset_kind", "all")  # all | stocks
     min_age = params.get("min_pool_age", 0)
     limit = params.get("limit", 40)
     max_apy = params.get("max_apy", 2000.0)      # drop obvious junk only
@@ -760,6 +808,10 @@ def scan_lp(params: dict) -> dict:
         if token and token not in d["symbol"]:
             continue
         if chain != "all" and d["chain"] != chain:
+            continue
+        if project != "all" and d["project"] != project:
+            continue
+        if asset_kind == "stocks" and not d["is_stock"]:
             continue
         if min_age and d["age_days"] < min_age:
             continue
@@ -784,6 +836,23 @@ def scan_lp(params: dict) -> dict:
                   "best_net_apy": round(best_net, 2) if best_net is not None else None},
         "count": len(out),
         "pools": out[:limit],
+    }
+
+
+def lp_meta() -> dict:
+    """Distinct chains and DEX projects among LP pools, for populating filter dropdowns.
+    Sorted by number of pools (most common first)."""
+    rows = fetch(POOLS_URL)
+    chains: dict[str, int] = {}
+    projects: dict[str, int] = {}
+    for r in rows:
+        if r.get("exposure") != "multi":
+            continue
+        chains[r.get("chain", "?")] = chains.get(r.get("chain", "?"), 0) + 1
+        projects[r.get("project", "?")] = projects.get(r.get("project", "?"), 0) + 1
+    return {
+        "chains": [c for c, _ in sorted(chains.items(), key=lambda kv: kv[1], reverse=True)],
+        "projects": [p for p, _ in sorted(projects.items(), key=lambda kv: kv[1], reverse=True)],
     }
 
 
