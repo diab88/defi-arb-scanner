@@ -132,6 +132,7 @@ def add_item(opp: dict, params: dict, threshold: float, floor: float = 10.0) -> 
         item = {
             "id": uuid.uuid4().hex[:8],
             "added_at": now_iso(),
+            "type": "loop",
             "key": key,
             "label": make_label(legs),
             "chain": legs["collateral"]["chain"],
@@ -147,6 +148,38 @@ def add_item(opp: dict, params: dict, threshold: float, floor: float = 10.0) -> 
             "alert_floor": False,       # current APY fell below the floor
             "alert_threshold": float(threshold),   # pp drop that triggers alert_drop
             "min_apy_floor": float(floor),         # APY below this triggers alert_floor
+        }
+        PORTFOLIO.append(item)
+        save_portfolio()
+        return item
+
+
+def add_lp_item(pool: dict, threshold: float, floor: float = 5.0) -> dict:
+    """Add an LP pool to the portfolio for monitoring."""
+    pool_id = pool["pool_id"]
+    with LOCK:
+        for it in PORTFOLIO:
+            if it.get("key") == pool_id:
+                return it
+        item = {
+            "id": uuid.uuid4().hex[:8],
+            "added_at": now_iso(),
+            "type": "lp",
+            "key": pool_id,
+            "label": f"{pool['project']} {pool['symbol']} LP",
+            "chain": pool["chain"],
+            "pool_id": pool_id,
+            "lp": pool,                  # full entry snapshot
+            "params": {"reward_discount": 0.5},
+            "baseline_net_apy": pool["net_est_apy"],
+            "current_net_apy": pool["net_est_apy"],
+            "drop_pp": 0.0,
+            "last_checked": now_iso(),
+            "alert": False,
+            "alert_drop": False,
+            "alert_floor": False,
+            "alert_threshold": float(threshold),
+            "min_apy_floor": float(floor),
         }
         PORTFOLIO.append(item)
         save_portfolio()
@@ -199,7 +232,12 @@ def check_all() -> int:
     fired: list[tuple[dict, str]] = []
     with LOCK:
         for it in PORTFOLIO:
-            cur = scanner.recompute_strategy(it["legs"], it["params"], pools_by_id, lb_by_id)
+            if it.get("type") == "lp":
+                cur = scanner.recompute_lp(it["pool_id"], it["params"], pools_by_id)
+                net = cur["net_est_apy"] if cur else None
+            else:
+                cur = scanner.recompute_strategy(it["legs"], it["params"], pools_by_id, lb_by_id)
+                net = cur["net_apy_after_costs"] if cur else None
             it["last_checked"] = now_iso()
             if cur is None:
                 it["current_net_apy"] = None
@@ -213,7 +251,6 @@ def check_all() -> int:
                     fired.append((it, msg))
                 continue
             it["alert_gone"] = False
-            net = cur["net_apy_after_costs"]
             it["current_net_apy"] = net
             it["current"] = cur
             drop = round(it["baseline_net_apy"] - net, 2)
@@ -331,7 +368,8 @@ PAGE = r"""<!doctype html>
 <header>
   <h1>DeFi Yield-Carry Loops</h1>
   <nav>
-    <button id="tab-scanner" class="active" onclick="showView('scanner')">Scanner</button>
+    <button id="tab-scanner" class="active" onclick="showView('scanner')">Loop Scanner</button>
+    <button id="tab-lp" onclick="showView('lp')">LP Pools</button>
     <button id="tab-portfolio" onclick="showView('portfolio')">Portfolio <span id="pf-count" class="muted"></span></button>
   </nav>
   <div class="bell" onclick="toggleNotif()">🔔<span id="notif-badge" class="badge hidden">0</span></div>
@@ -389,6 +427,34 @@ PAGE = r"""<!doctype html>
   </tr></thead><tbody id="rows"></tbody></table>
 </div>
 
+<!-- LP POOLS VIEW -->
+<div id="view-lp" class="hidden">
+  <div class="controls">
+    <label class="ctl"><span class="tip" data-tip="Minimum estimated net APY = fee+reward APY minus the approximate impermanent-loss estimate.">Min net APY %</span><input id="lp_min_net_apy" type="number" value="5" step="1"></label>
+    <label class="ctl">Min TVL $<input id="lp_min_tvl" type="number" value="5000000" step="1000000"></label>
+    <label class="ctl"><span class="tip" data-tip="Minimum trading volume over the last 7 days. Fees only exist where there's real trading — this filters out dead pools.">Min 7d volume $</span><input id="lp_min_vol7d" type="number" value="1000000" step="1000000"></label>
+    <label class="ctl"><span class="tip" data-tip="Average daily volume ÷ TVL, as a %. Higher = more fees earned per dollar of liquidity (fee efficiency). >20% is active.">Min vol/TVL %</span><input id="lp_min_vol_tvl" type="number" value="0" step="5"></label>
+    <label class="ctl"><span class="tip" data-tip="Pair type by impermanent-loss risk. stable = stablecoin pairs (near-zero IL); correlated = same-class incl. LSTs (low IL); exclude volatile = drop volatile-volatile pairs.">Pair type</span>
+      <select id="lp_pair_type"><option value="all">all</option><option value="stable">stablecoin</option><option value="correlated">correlated (low IL)</option><option value="exclude_volatile">exclude volatile-volatile</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="Only pairs whose symbol contains this token, e.g. WETH or USDC.">Token contains</span><input id="lp_token" type="text" value="" placeholder="e.g. WETH" style="width:90px;"></label>
+    <label class="ctl">Min pool age (days)<input id="lp_min_pool_age" type="number" value="0" min="0" step="30" style="width:80px;"></label>
+    <label class="ctl">Limit<input id="lp_limit" type="number" value="40" step="5"></label>
+    <button id="lp_run" class="go" onclick="runLpScan()">Run LP scan</button>
+  </div>
+  <div id="lp-stats">Screen Uniswap-style liquidity pools by fees, volume and impermanent-loss estimate. Click <b>Run LP scan</b>.</div>
+  <table><thead><tr>
+    <th></th><th>#</th>
+    <th><span class="tip" data-tip="Estimated net APY = fee + reward APY − approximate impermanent loss. Rows ranked by this. IL is a rough heuristic, not a guarantee.">Net (est)</span></th>
+    <th><span class="tip" data-tip="Fee APY (from trading) + reward APY (incentives), spike-guarded to the 30-day average.">Fee+Rew</span></th>
+    <th><span class="tip" data-tip="Approximate annual impermanent loss for this pair, estimated from the two assets' volatility (σ²/8). Approximate — verify before committing.">IL est</span></th>
+    <th><span class="tip" data-tip="Total value locked in the pool.">TVL</span></th>
+    <th><span class="tip" data-tip="Trading volume over the last 7 days.">7d Vol</span></th>
+    <th><span class="tip" data-tip="Average daily volume ÷ TVL (%). Fee efficiency — higher means more fees per dollar of liquidity.">Vol/TVL</span></th>
+    <th><span class="tip" data-tip="IL category: stable-stable / correlated / stable-volatile / volatile-volatile.">Pair</span></th>
+    <th>Age</th><th>Trend</th><th>Pool</th>
+  </tr></thead><tbody id="lp-rows"></tbody></table>
+</div>
+
 <!-- PORTFOLIO VIEW -->
 <div id="view-portfolio" class="hidden">
   <div id="pf-info"></div>
@@ -417,11 +483,99 @@ document.getElementById("auto").addEventListener("change", e => {
 });
 
 function showView(v) {
-  document.getElementById("view-scanner").classList.toggle("hidden", v !== "scanner");
-  document.getElementById("view-portfolio").classList.toggle("hidden", v !== "portfolio");
-  document.getElementById("tab-scanner").classList.toggle("active", v === "scanner");
-  document.getElementById("tab-portfolio").classList.toggle("active", v === "portfolio");
+  ["scanner","lp","portfolio"].forEach(name => {
+    document.getElementById("view-"+name).classList.toggle("hidden", v !== name);
+    document.getElementById("tab-"+name).classList.toggle("active", v === name);
+  });
   if (v === "portfolio") loadPortfolio();
+}
+
+const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
+async function runLpScan() {
+  const btn = document.getElementById("lp_run");
+  btn.disabled = true; btn.textContent = "Scanning...";
+  document.getElementById("lp-stats").textContent = "Fetching DefiLlama LP pools...";
+  const q = new URLSearchParams();
+  LP_IDS.forEach(id => q.set(id.replace("lp_",""), document.getElementById(id).value));
+  try {
+    const res = await fetch("/api/lpscan?" + q.toString());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderLp(data);
+  } catch (e) { document.getElementById("lp-stats").textContent = "Error: " + e.message; }
+  finally { btn.disabled = false; btn.textContent = "Run LP scan"; }
+}
+
+function renderLp(data) {
+  const s = data.stats;
+  document.getElementById("lp-stats").innerHTML =
+    `${data.count} pools from ${s.lp_pools} LP pools · as of ${data.generated_at}` +
+    (data.count === 0 && s.best_net_apy != null ? ` · best available net ${s.best_net_apy.toFixed(2)}% — lower Min net APY` : "");
+  const tb = document.getElementById("lp-rows"); tb.innerHTML = "";
+  window._lp = data.pools;
+  data.pools.forEach((p, i) => {
+    const tr = document.createElement("tr"); tr.className = "clickable";
+    tr.onclick = () => openLpDetail(p);
+    tr.innerHTML =
+      `<td><button class="addbtn" onclick="event.stopPropagation();addLpToPortfolio(${i})">★ Add</button></td>` +
+      `<td class="muted">${i+1}</td>` +
+      `<td class="num net">${p.net_est_apy.toFixed(2)}%</td>` +
+      `<td class="num muted">${p.apy_total.toFixed(1)}%</td>` +
+      `<td class="num" style="color:#d29922">${p.il_est.toFixed(1)}%</td>` +
+      `<td class="num">${fmtTvl(p.tvl_usd)}</td>` +
+      `<td class="num muted">${fmtTvl(p.vol7d_usd)}</td>` +
+      `<td class="num">${p.vol_tvl_pct.toFixed(0)}%</td>` +
+      `<td class="muted">${p.pair_type}</td>` +
+      `<td class="num muted">${fmtAge(p.age_days)}</td>` +
+      `<td>${momArrow(p.momentum)}</td>` +
+      `<td>${link(p.project+"/"+p.chain+" "+p.symbol, p.url)}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+async function addLpToPortfolio(i) {
+  const p = window._lp[i];
+  const res = await fetch("/api/portfolio", { method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ type: "lp", pool: p, alert_threshold: 3.0, min_apy_floor: 5.0 }) });
+  const r = await res.json();
+  if (r.ok) { refreshBadges(); alert("LP pool added to portfolio. It will be re-checked automatically."); }
+  else alert("Error: " + (r.error || "could not add"));
+}
+
+function openLpDetail(p, ctx) {
+  const lnk = (t,u) => u ? `<a href="${u}" target="_blank" rel="noopener">${t}</a>` : `<b>${t}</b>`;
+  const parts = p.symbol.split("-");
+  let pfBox = "";
+  if (ctx) {
+    const cur = ctx.current, drop = (cur != null) ? (ctx.entry - cur) : null;
+    pfBox = `<div class="box"><b>📌 Your tracked LP position</b> — added ${localTime(ctx.added_at)}.<br>` +
+      `Entry net APY <b>${ctx.entry.toFixed(2)}%</b> → current <b>${cur != null ? cur.toFixed(2)+"%" : "gone"}</b>` +
+      `${drop != null ? ` (Δ ${drop > 0 ? "+" : ""}${drop.toFixed(2)} pp)` : ""}.</div>`;
+  }
+  const ilNote = p.pair_type === "stable-stable"
+    ? "This is a stablecoin pair, so impermanent loss is minimal."
+    : p.pair_type === "correlated"
+    ? "The two assets track each other closely, so impermanent loss is low."
+    : `Because the two assets can diverge in price, you face impermanent loss — estimated ~<b>${p.il_est.toFixed(1)}%/yr</b> here (approximate, from assumed volatility). If one asset moves a lot vs the other, IL grows and can exceed the fees.`;
+  document.getElementById("modal").innerHTML =
+    `<button class="close" onclick="closeDetail()">Close ✕</button>` +
+    `<h2>${p.project} · ${p.symbol} LP</h2>` +
+    `<div class="tag">${p.chain} · ${p.pair_type} · TVL ${fmtTvl(p.tvl_usd)} · ${fmtAge(p.age_days)} old</div>` +
+    `<div class="big">${p.net_est_apy.toFixed(2)}% net (est)</div>` +
+    pfBox +
+    `<div class="box">Fee+reward APY <b>${p.apy_total.toFixed(1)}%</b> (base ${p.apy_base.toFixed(1)}% + reward ${p.apy_reward.toFixed(1)}%) − est. impermanent loss <b>${p.il_est.toFixed(1)}%</b> = <b>${p.net_est_apy.toFixed(2)}% net</b>. ` +
+    `Avg daily volume is <b>${p.vol_tvl_pct.toFixed(0)}%</b> of TVL — the higher, the more fees per dollar you provide.</div>` +
+    `<h3>How to provide liquidity</h3><ol>` +
+    `<li><span class="step-num">1. Get both assets.</span> You supply <b>${parts[0]}</b> and <b>${parts[1]}</b> in equal value (50/50). Acquire whichever you're short of via a DEX.</li>` +
+    `<li><span class="step-num">2. Add liquidity.</span> Deposit the pair into ${lnk(p.project, p.url)} on ${p.chain}. You receive an LP position that earns trading fees${p.apy_reward>0?" + reward incentives":""}.</li>` +
+    `<li><span class="step-num">3. Monitor.</span> Add this to your Portfolio to auto-track the APY. Watch the price ratio of ${parts[0]}/${parts[1]} — divergence causes impermanent loss.</li>` +
+    `<li><span class="step-num">4. Exit.</span> Withdraw the pair from the pool. Your realized return = fees earned − impermanent loss at that point.</li>` +
+    `</ol>` +
+    `<h3>Impermanent-loss note</h3><div class="box risk-box">${ilNote}</div>` +
+    `<h3>Pool APY history</h3><div id="poolchart" class="muted">Loading APY history…</div>` +
+    `<div class="disclaimer">Educational walkthrough from live DefiLlama data. The IL figure is an approximate heuristic (σ²/8), not a guarantee. Not financial advice. Verify on the protocol before committing funds.</div>`;
+  document.getElementById("overlay").classList.add("open");
+  loadPoolChart(p.pool_id, p.symbol);
 }
 
 async function runScan() {
@@ -531,8 +685,14 @@ async function loadPortfolio() {
       status = '<span class="pill ok">OK</span>';
     }
     const floorVal = it.min_apy_floor != null ? it.min_apy_floor : 10;
-    const c = it.legs.collateral, b = it.legs.borrow, d = it.legs.deploy;
-    const lbl = `${link(c.project,c.url)} <b>${c.symbol}</b> → borrow ${link(b.project,b.url)} <b>${b.symbol}</b> → ${link(d.project,d.url)} <b>${d.symbol}</b>`;
+    let lbl;
+    if (it.type === "lp") {
+      const lp = it.lp || {};
+      lbl = `${link(lp.project || it.label, lp.url)} <b>${lp.symbol || ""}</b> <span class="muted" style="font-size:10px;">LP</span>`;
+    } else {
+      const c = it.legs.collateral, b = it.legs.borrow, d = it.legs.deploy;
+      lbl = `${link(c.project,c.url)} <b>${c.symbol}</b> → borrow ${link(b.project,b.url)} <b>${b.symbol}</b> → ${link(d.project,d.url)} <b>${d.symbol}</b>`;
+    }
     const tr = document.createElement("tr"); tr.className = "clickable";
     tr.onclick = () => openPortfolioDetail(it.id);
     tr.innerHTML =
@@ -555,7 +715,8 @@ async function openPortfolioDetail(id) {
     const res = await fetch("/api/portfolio/detail", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({id}) });
     const data = await res.json();
     if (data.error) { alert(data.error); return; }
-    openDetail(data.opportunity, data.params, data.ctx, data.source);
+    if (data.type === "lp") openLpDetail(data.lp, data.ctx);
+    else openDetail(data.opportunity, data.params, data.ctx, data.source);
   } catch (e) { alert("Could not load detail: " + e.message); }
 }
 
@@ -777,6 +938,27 @@ def cfg_from_query(qs: dict) -> scanner.ScanConfig:
     )
 
 
+def lp_params_from_query(qs: dict) -> dict:
+    def g(name, cast, default):
+        if name in qs and qs[name]:
+            try:
+                return cast(qs[name][0])
+            except ValueError:
+                return default
+        return default
+    return {
+        "min_net_apy": g("min_net_apy", float, 5.0),
+        "min_tvl": g("min_tvl", float, 5_000_000),
+        "min_vol7d": g("min_vol7d", float, 0.0),
+        "min_vol_tvl": g("min_vol_tvl", float, 0.0),
+        "pair_type": g("pair_type", str, "all"),
+        "token": g("token", str, ""),
+        "min_pool_age": g("min_pool_age", int, 0),
+        "limit": g("limit", int, 40),
+        "reward_discount": g("reward_discount", float, 0.5),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -804,6 +986,11 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/scan":
             try:
                 self._send(200, json.dumps(scanner.scan(cfg_from_query(parse_qs(p.query)))))
+            except Exception as e:  # noqa: BLE001
+                self._send(500, json.dumps({"error": str(e)}))
+        elif p.path == "/api/lpscan":
+            try:
+                self._send(200, json.dumps(scanner.scan_lp(lp_params_from_query(parse_qs(p.query)))))
             except Exception as e:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(e)}))
         elif p.path == "/api/portfolio":
@@ -847,8 +1034,12 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         if p.path == "/api/portfolio":
             try:
-                item = add_item(body["opportunity"], body.get("params") or {},
-                                body.get("alert_threshold", 3.0), body.get("min_apy_floor", 10.0))
+                if body.get("type") == "lp":
+                    item = add_lp_item(body["pool"], body.get("alert_threshold", 3.0),
+                                       body.get("min_apy_floor", 5.0))
+                else:
+                    item = add_item(body["opportunity"], body.get("params") or {},
+                                    body.get("alert_threshold", 3.0), body.get("min_apy_floor", 10.0))
                 self._send(200, json.dumps({"ok": True, "id": item["id"]}))
             except (KeyError, TypeError) as e:
                 self._send(400, json.dumps({"error": f"bad payload: {e}"}))
@@ -870,6 +1061,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ctx = {"added_at": item["added_at"], "entry": item["baseline_net_apy"],
                    "current": item.get("current_net_apy"), "params": item["params"]}
+            if item.get("type") == "lp":
+                # LP item: show the entry snapshot (or the latest re-priced one).
+                lp = item.get("current") or item.get("lp")
+                self._send(200, json.dumps({"type": "lp", "lp": lp, "ctx": ctx}))
+                return
             if item.get("opportunity"):
                 self._send(200, json.dumps({"opportunity": item["opportunity"],
                                             "params": item["params"], "ctx": ctx, "source": "entry"}))

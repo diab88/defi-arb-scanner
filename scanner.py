@@ -663,6 +663,138 @@ def recompute_strategy(legs: dict, params: dict,
     return opp_to_dict(opp)
 
 
+# ============================ LP-pool screener (Uniswap-style pairs) ============================
+
+# Assumed annualized price volatility per asset class, used only for the IL estimate.
+ASSET_VOL = {"STABLE": 0.02, "ETH": 0.60, "BTC": 0.50, "SOL": 0.80}
+DEFAULT_ASSET_VOL = 1.0  # unknown / alt tokens: assume very volatile
+
+
+def pair_parts(symbol: str) -> list[str]:
+    return [p for p in (symbol or "").upper().replace("/", "-").split("-") if p]
+
+
+def estimate_il(symbol: str) -> tuple[float, str]:
+    """Rough annual impermanent-loss estimate (%) for a 2-asset 50/50 pool.
+
+    Uses the standard small-move approximation IL ≈ σ_ratio² / 8, where σ_ratio is the
+    annualized volatility of the two assets' price ratio, assumed from their asset class.
+    Cross-class pairs assume independence (a conservative upper-ish bound). Returns
+    (il_pct, pair_type). Deliberately approximate — DefiLlama's own il7d is usually empty.
+    """
+    parts = pair_parts(symbol)
+    if len(parts) < 2:
+        return 0.0, "single"
+    a, b = parts[0], parts[1]
+    ca, cb = asset_class(a), asset_class(b)
+    if ca == "STABLE" and cb == "STABLE":
+        return 0.05, "stable-stable"
+    if ca and cb and ca == cb:
+        sigma = 0.10  # same volatile class (e.g. LSTs) — track each other closely
+        return round(sigma ** 2 / 8 * 100, 2), "correlated"
+    va = ASSET_VOL.get(ca, DEFAULT_ASSET_VOL)
+    vb = ASSET_VOL.get(cb, DEFAULT_ASSET_VOL)
+    sigma = (va ** 2 + vb ** 2) ** 0.5
+    ptype = "stable-volatile" if (ca == "STABLE" or cb == "STABLE") else "volatile-volatile"
+    return round(sigma ** 2 / 8 * 100, 2), ptype
+
+
+def lp_pool_to_dict(r: dict, reward_discount: float) -> dict:
+    """Build the screener row for a single multi-asset LP pool row from /pools."""
+    sym = r.get("symbol") or ""
+    apy_total, spot, mean30, spiked = guarded_apy(r, reward_discount)
+    il, ptype = estimate_il(sym)
+    tvl = float(r.get("tvlUsd") or 0.0)
+    vol7 = float(r.get("volumeUsd7d") or 0.0)
+    vol_tvl = round((vol7 / 7.0) / tvl * 100, 2) if tvl else 0.0  # avg daily volume / TVL, %
+    return {
+        "pool_id": r.get("pool", ""),
+        "project": r.get("project", "?"),
+        "chain": r.get("chain", "?"),
+        "symbol": sym,
+        "apy_total": round(apy_total, 2),
+        "apy_base": round(r.get("apyBase") or 0.0, 2),
+        "apy_reward": round(r.get("apyReward") or 0.0, 2),
+        "apy_mean30d": round(mean30, 2),
+        "apy_spiked": spiked,
+        "il_est": il,
+        "net_est_apy": round(apy_total - il, 2),
+        "pair_type": ptype,
+        "tvl_usd": round(tvl),
+        "vol7d_usd": round(vol7),
+        "vol_tvl_pct": vol_tvl,
+        "age_days": int(r.get("count") or 0),
+        "momentum": momentum_label(r.get("apyPct7D")),
+        "il_risk": r.get("ilRisk", "no"),
+        "url": pool_url(r.get("pool", "")),
+    }
+
+
+def scan_lp(params: dict) -> dict:
+    """Screen Uniswap-style 2-asset LP pools. Returns a JSON-serializable snapshot."""
+    rd = params.get("reward_discount", 0.5)
+    min_tvl = params.get("min_tvl", 5_000_000)
+    min_vol7d = params.get("min_vol7d", 0)
+    min_vol_tvl = params.get("min_vol_tvl", 0.0)
+    min_net_apy = params.get("min_net_apy", 0.0)
+    pair_type = params.get("pair_type", "all")   # all | stable | correlated | exclude_volatile
+    token = (params.get("token") or "").upper()
+    chain = params.get("chain", "all")
+    min_age = params.get("min_pool_age", 0)
+    limit = params.get("limit", 40)
+    max_apy = params.get("max_apy", 2000.0)      # drop obvious junk only
+
+    rows = fetch(POOLS_URL)
+    out, best_net, n_lp = [], None, 0
+    for r in rows:
+        if r.get("exposure") != "multi":
+            continue
+        if len(pair_parts(r.get("symbol"))) < 2:
+            continue
+        n_lp += 1
+        d = lp_pool_to_dict(r, rd)
+        if d["tvl_usd"] < min_tvl or d["apy_total"] > max_apy or d["apy_total"] <= 0:
+            continue
+        if d["vol7d_usd"] < min_vol7d or d["vol_tvl_pct"] < min_vol_tvl:
+            continue
+        if token and token not in d["symbol"]:
+            continue
+        if chain != "all" and d["chain"] != chain:
+            continue
+        if min_age and d["age_days"] < min_age:
+            continue
+        if pair_type == "stable" and d["pair_type"] != "stable-stable":
+            continue
+        if pair_type == "correlated" and d["pair_type"] not in ("stable-stable", "correlated"):
+            continue
+        if pair_type == "exclude_volatile" and d["pair_type"] == "volatile-volatile":
+            continue
+        if best_net is None or d["net_est_apy"] > best_net:
+            best_net = d["net_est_apy"]
+        if d["net_est_apy"] < min_net_apy:
+            continue
+        out.append(d)
+
+    out.sort(key=lambda x: x["net_est_apy"], reverse=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "generated_at": ts,
+        "params": params,
+        "stats": {"lp_pools": n_lp, "matches": len(out),
+                  "best_net_apy": round(best_net, 2) if best_net is not None else None},
+        "count": len(out),
+        "pools": out[:limit],
+    }
+
+
+def recompute_lp(pool_id: str, params: dict, pools_by_id: dict) -> dict | None:
+    """Re-price a single LP pool by id (for portfolio monitoring). None if it vanished."""
+    r = pools_by_id.get(pool_id)
+    if not r:
+        return None
+    return lp_pool_to_dict(r, params.get("reward_discount", 0.5))
+
+
 def opp_to_dict(o: Opportunity) -> dict:
     return {
         "net_apy": round(o.net_apy, 2),

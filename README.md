@@ -133,6 +133,21 @@ so results are identical. Features:
   net long it), the detail panel adds a "⚖️ Hedge suggested" note and step explaining how to short
   the asset in futures to run it delta-neutral, sized to your collateral.
 
+## LP Pools screener (Uniswap-style liquidity provision)
+
+A second strategy, in its own **LP Pools** tab: providing liquidity to two-asset pools to earn
+**trading fees + reward incentives**, where the main risk is **impermanent loss** (not liquidation).
+
+- Screens DefiLlama's ~12,500 multi-asset LP pools by: min net APY, min TVL, **min 7-day volume**,
+  **volume/TVL ratio** (fee efficiency), **pair type** (stablecoin / correlated / exclude volatile),
+  token, and min pool age.
+- **IL estimate:** each pair gets an approximate annual impermanent-loss figure from the two assets'
+  assumed volatility (`IL ≈ σ²/8`), and the table ranks by **net (est) = fee+reward APY − IL**.
+  This is a heuristic, clearly labelled — DefiLlama's own `il7d` is usually empty.
+- Click a row for an LP how-to walkthrough, an IL note, and the pool's **APY history chart**.
+- **★ Add** an LP pool to your Portfolio — it's monitored hourly alongside loop strategies and
+  fires the same drop/floor alerts.
+
 ## Portfolio + alerts (in the dashboard)
 
 The dashboard has two tabs: **Scanner** and **Portfolio**.
