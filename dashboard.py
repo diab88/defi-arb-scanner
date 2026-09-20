@@ -431,15 +431,17 @@ PAGE = r"""<!doctype html>
 <div id="view-lp" class="hidden">
   <div class="controls">
     <label class="ctl"><span class="tip" data-tip="Minimum estimated net APY = fee+reward APY minus the approximate impermanent-loss estimate.">Min net APY %</span><input id="lp_min_net_apy" type="number" value="5" step="1"></label>
-    <label class="ctl">Min TVL $<input id="lp_min_tvl" type="number" value="5000000" step="1000000"></label>
-    <label class="ctl"><span class="tip" data-tip="Minimum trading volume over the last 7 days. Fees only exist where there's real trading — this filters out dead pools.">Min 7d volume $</span><input id="lp_min_vol7d" type="number" value="1000000" step="1000000"></label>
+    <label class="ctl">Min TVL $<input id="lp_min_tvl" type="number" value="100000" step="100000"></label>
+    <label class="ctl"><span class="tip" data-tip="Minimum trading volume over the last 7 days. Fees only exist where there's real trading. Kept low by default so small (e.g. tokenized-stock) pools show — raise it to focus on liquid pools.">Min 7d volume $</span><input id="lp_min_vol7d" type="number" value="0" step="100000"></label>
     <label class="ctl"><span class="tip" data-tip="Average daily volume ÷ TVL, as a %. Higher = more fees earned per dollar of liquidity (fee efficiency). >20% is active.">Min vol/TVL %</span><input id="lp_min_vol_tvl" type="number" value="0" step="5"></label>
     <label class="ctl"><span class="tip" data-tip="Blockchain the pool is on (populated from live data, most common first).">Chain</span>
       <select id="lp_chain"><option value="all">all</option></select></label>
     <label class="ctl"><span class="tip" data-tip="DEX / protocol, e.g. uniswap-v3, raydium-amm, orca-dex (populated from live data).">Protocol</span>
       <select id="lp_project"><option value="all">all</option></select></label>
-    <label class="ctl"><span class="tip" data-tip="Asset kind. 'tokenized stocks' keeps only pools where one leg is an on-chain equity (xStocks / Robinhood — TSLAx, NVDAx, METAx, SPYx…), typically paired with a stablecoin (USDC/USDT/USDG).">Asset kind</span>
+    <label class="ctl"><span class="tip" data-tip="Asset kind. 'tokenized stocks' keeps only pools where one leg is an on-chain equity (xStocks / Robinhood — TSLAx, NVDAx, METAx, SPYx, SPCX…). Most are paired with a stablecoin; combine with 'Stablecoin leg = required'.">Asset kind</span>
       <select id="lp_asset_kind"><option value="all">all</option><option value="stocks">tokenized stocks 📈</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="Require at least one leg to be a stablecoin (USDC/USDT/USDG/DAI…). This is 'a stablecoin is one side of the pair' — different from Pair type = stablecoin, which needs BOTH legs stable.">Stablecoin leg</span>
+      <select id="lp_has_stable"><option value="0">any</option><option value="1">required</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Pair type by impermanent-loss risk. stable = stablecoin pairs (near-zero IL); correlated = same-class incl. LSTs (low IL); exclude volatile = drop volatile-volatile pairs.">Pair type</span>
       <select id="lp_pair_type"><option value="all">all</option><option value="stable">stablecoin</option><option value="correlated">correlated (low IL)</option><option value="exclude_volatile">exclude volatile-volatile</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Only pairs whose symbol contains this token, e.g. WETH or TSLAX.">Token contains</span><input id="lp_token" type="text" value="" placeholder="e.g. TSLAX" style="width:90px;"></label>
@@ -497,7 +499,7 @@ function showView(v) {
   if (v === "lp") loadLpMeta();
 }
 
-const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
+const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_has_stable","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
 let lpMetaLoaded = false;
 async function loadLpMeta() {
   if (lpMetaLoaded) return;
@@ -975,6 +977,7 @@ def lp_params_from_query(qs: dict) -> dict:
         "chain": g("chain", str, "all"),
         "project": g("project", str, "all"),
         "asset_kind": g("asset_kind", str, "all"),
+        "has_stable": g("has_stable", lambda v: v == "1", False),
         "min_pool_age": g("min_pool_age", int, 0),
         "limit": g("limit", int, 40),
         "reward_discount": g("reward_discount", float, 0.5),

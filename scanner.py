@@ -678,11 +678,12 @@ STOCK_TICKERS = {
     "AAPL", "ABBV", "ABT", "ACN", "AMD", "AMZN", "APP", "AVGO", "AZN", "BAC", "BRKB",
     "CMCSA", "COIN", "CRCL", "CRM", "CRWD", "CSCO", "DFDV", "DHR", "DIS", "GLD", "GME",
     "GOOG", "GOOGL", "HON", "HOOD", "IBM", "INTC", "JNJ", "JPM", "KO", "LIN", "LLY", "MA",
-    "MCD", "MDT", "META", "MRK", "MRVL", "MSFT", "MSTR", "NFLX", "NKE", "NVDA", "NVO",
-    "OPENAI", "ORCL", "PEP", "PFE", "PG", "PLTR", "QQQ", "SPACEX", "SPY", "TBLL",
-    "TMO", "TQQQ", "TSLA", "UNH", "VTI", "WMT", "XOM",
+    "MCD", "MDT", "META", "MRK", "MRVL", "MSFT", "MSTR", "MU", "NET", "NFLX", "NKE", "NVDA",
+    "NVO", "OPENAI", "ORCL", "PEP", "PFE", "PG", "PLTR", "QQQ", "RDDT", "SGOV", "SHOP",
+    "SLV", "SNAP", "SNDK", "SPACEX", "SPCX", "SPY", "TBLL", "TMO", "TQQQ", "TSLA", "UNH",
+    "USO", "VTI", "WMT", "XOM",
 }
-STOCK_CHAINS = {"robinhood chain"}  # chains whose pools are tokenized equities by nature
+STOCK_CHAINS = {"robinhood chain"}  # dedicated tokenized-equity chains (plain-ticker names)
 
 
 def pair_parts(symbol: str) -> list[str]:
@@ -690,23 +691,40 @@ def pair_parts(symbol: str) -> list[str]:
 
 
 def stock_of(leg: str) -> str | None:
-    """Return the underlying stock ticker if `leg` is a tokenized equity, else None."""
+    """Underlying ticker if `leg` is an x-suffixed tokenized equity (TSLAx -> TSLA).
+
+    Requires a 3+ letter base so short tickers don't collide (e.g. MAX -/-> MA, KOX -/-> KO).
+    This form is unambiguous on any chain (the xStocks naming convention).
+    """
     u = (leg or "").upper()
-    if u in STOCK_TICKERS:
-        return u
-    if u.endswith("X") and u[:-1] in STOCK_TICKERS:  # xStocks convention: TSLAx -> TSLA
+    if u.endswith("X") and len(u) >= 4 and u[:-1] in STOCK_TICKERS:
         return u[:-1]
     return None
 
 
 def is_stock_pool(symbol: str, chain: str = "") -> bool:
-    if (chain or "").lower() in STOCK_CHAINS:
+    """A pool includes a tokenized equity if a leg is x-suffixed (any chain), or — only on a
+    dedicated equity chain like Robinhood Chain — a leg is a plain stock ticker. The plain
+    match is chain-gated so memecoins that share a ticker (e.g. GME on Ethereum) aren't caught."""
+    parts = pair_parts(symbol)
+    if any(stock_of(p) for p in parts):
         return True
-    return any(stock_of(p) for p in pair_parts(symbol))
+    if (chain or "").lower() in STOCK_CHAINS:
+        return any(p in STOCK_TICKERS for p in parts)
+    return False
+
+
+def has_stable_leg(symbol: str) -> bool:
+    return any(asset_class(p) == "STABLE" for p in pair_parts(symbol))
+
+
+def _is_stock_leg(leg: str) -> bool:
+    """Looser stock check for the IL volatility estimate only (plain or x-suffixed)."""
+    return stock_of(leg) is not None or (leg or "").upper() in STOCK_TICKERS
 
 
 def _leg_vol(leg: str) -> float:
-    if stock_of(leg):
+    if _is_stock_leg(leg):
         return STOCK_VOL
     c = asset_class(leg)
     if c == "STABLE":
@@ -725,7 +743,7 @@ def estimate_il(symbol: str) -> tuple[float, str]:
     if len(parts) < 2:
         return 0.0, "single"
     a, b = parts[0], parts[1]
-    sa, sb = stock_of(a), stock_of(b)
+    sa, sb = _is_stock_leg(a), _is_stock_leg(b)
     ca, cb = asset_class(a), asset_class(b)
     if not (sa or sb):
         if ca == "STABLE" and cb == "STABLE":
@@ -788,6 +806,7 @@ def scan_lp(params: dict) -> dict:
     chain = params.get("chain", "all")
     project = params.get("project", "all")       # DEX/protocol, e.g. uniswap-v3
     asset_kind = params.get("asset_kind", "all")  # all | stocks
+    require_stable = bool(params.get("has_stable", False))  # require ≥1 stablecoin leg
     min_age = params.get("min_pool_age", 0)
     limit = params.get("limit", 40)
     max_apy = params.get("max_apy", 2000.0)      # drop obvious junk only
@@ -812,6 +831,8 @@ def scan_lp(params: dict) -> dict:
         if project != "all" and d["project"] != project:
             continue
         if asset_kind == "stocks" and not d["is_stock"]:
+            continue
+        if require_stable and not has_stable_leg(d["symbol"]):
             continue
         if min_age and d["age_days"] < min_age:
             continue
