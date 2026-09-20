@@ -10,7 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # App code (single self-contained image — no bind mounts needed)
-COPY scanner.py dashboard.py monitor.py backtest.py ./
+COPY scanner.py dashboard.py monitor.py backtest.py whales.py ./
 
 # Persisted state (portfolio + notifications). Mount a volume here to keep it across
 # restarts; on ephemeral platforms it simply resets.

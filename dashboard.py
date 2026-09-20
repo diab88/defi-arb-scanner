@@ -34,15 +34,18 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 import scanner  # reuse scan() + ScanConfig + recompute_strategy
+import whales   # Robinhood Chain whale tracking (Etherscan V2)
 
 DATA_DIR = os.environ.get("DEFI_DATA_DIR", "./data")
 PORTFOLIO_FILE = os.path.join(DATA_DIR, "portfolio.json")
 NOTIF_FILE = os.path.join(DATA_DIR, "notifications.json")
+WHALES_FILE = os.path.join(DATA_DIR, "whales.json")
 MONITOR_INTERVAL = int(os.environ.get("DEFI_MONITOR_INTERVAL", "3600"))
 
 LOCK = threading.Lock()
 PORTFOLIO: list[dict] = []
 NOTIFICATIONS: list[dict] = []
+WHALES: list[dict] = []
 
 
 # ----------------------------- persistence -----------------------------
@@ -60,10 +63,11 @@ def _load(path, default):
 
 
 def load_state() -> None:
-    global PORTFOLIO, NOTIFICATIONS
+    global PORTFOLIO, NOTIFICATIONS, WHALES
     os.makedirs(DATA_DIR, exist_ok=True)
     PORTFOLIO = _load(PORTFOLIO_FILE, [])
     NOTIFICATIONS = _load(NOTIF_FILE, [])
+    WHALES = _load(WHALES_FILE, [])
     # Backfill fields added in later versions so older saved items stay consistent.
     changed = False
     for it in PORTFOLIO:
@@ -90,6 +94,10 @@ def save_portfolio() -> None:
 
 def save_notifications() -> None:
     _save(NOTIF_FILE, NOTIFICATIONS[:200])
+
+
+def save_whales() -> None:
+    _save(WHALES_FILE, WHALES)
 
 
 # ----------------------------- telegram -----------------------------
@@ -290,6 +298,77 @@ def check_all() -> int:
     return len(fired)
 
 
+# ----------------------------- whale watchlist -----------------------------
+
+def short_addr(a: str) -> str:
+    return a[:6] + "…" + a[-4:] if a and len(a) > 12 else a
+
+
+def add_whale(address: str, label: str = "") -> dict:
+    address = (address or "").lower().strip()
+    with LOCK:
+        for w in WHALES:
+            if w["address"] == address:
+                return w
+        w = {"address": address, "label": label, "added_at": now_iso(),
+             "last_ts": int(time.time()), "last_checked": now_iso(), "last_activity": ""}
+        WHALES.append(w)
+        save_whales()
+        return w
+
+
+def remove_whale(address: str) -> None:
+    address = (address or "").lower().strip()
+    with LOCK:
+        WHALES[:] = [w for w in WHALES if w["address"] != address]
+        save_whales()
+
+
+def push_whale_notification(address: str, message: str) -> None:
+    NOTIFICATIONS.insert(0, {
+        "id": uuid.uuid4().hex[:8], "time": now_iso(),
+        "item_id": address, "label": f"🐋 Whale {short_addr(address)}",
+        "message": message, "read": False,
+    })
+
+
+def whale_check() -> int:
+    """Poll each watched wallet for new activity since last check; alert on anything new."""
+    with LOCK:
+        watch = list(WHALES)
+    if not watch or not whales.configured():
+        return 0
+    fired = []
+    for w in watch:
+        try:
+            acts = whales.wallet_new_activity(w["address"], w.get("last_ts", 0))
+        except Exception as e:  # noqa: BLE001
+            print(f"  whale check {w['address']}: {e}", file=sys.stderr)
+            continue
+        with LOCK:
+            w["last_checked"] = now_iso()
+            if acts:
+                newest = acts[0]
+                w["last_ts"] = newest["ts"]
+                a = newest
+                verb = ("received" if a["to"] == w["address"] else "sent") if a["kind"] == "tokentx" else "tx"
+                desc = (f"{verb} {a['token']}" if a["kind"] == "tokentx" else "on-chain transaction")
+                msg = (f"{len(acts)} new movement(s). Latest: {desc} "
+                       f"(tx {a['hash'][:10]}…). View on robin.etherscan.io.")
+                w["last_activity"] = msg
+                push_whale_notification(w["address"], msg)
+                fired.append((w, msg))
+        save_whales()
+    if fired:
+        save_notifications()
+    for w, msg in fired:
+        telegram_send(f"🐋 <b>Whale movement</b>\n{short_addr(w['address'])}"
+                      f"{(' — ' + w['label']) if w.get('label') else ''}\n{msg}")
+    if fired:
+        print(f"[{now_iso()}] whale check: {len(fired)} wallet(s) moved", file=sys.stderr)
+    return len(fired)
+
+
 def monitor_loop() -> None:
     # small initial delay so the server is up, then check on the interval
     time.sleep(10)
@@ -298,6 +377,10 @@ def monitor_loop() -> None:
             check_all()
         except Exception as e:  # noqa: BLE001 - keep the thread alive
             print(f"  monitor loop error: {e}", file=sys.stderr)
+        try:
+            whale_check()
+        except Exception as e:  # noqa: BLE001
+            print(f"  whale loop error: {e}", file=sys.stderr)
         time.sleep(MONITOR_INTERVAL)
 
 
@@ -370,6 +453,7 @@ PAGE = r"""<!doctype html>
   <nav>
     <button id="tab-scanner" class="active" onclick="showView('scanner')">Loop Scanner</button>
     <button id="tab-lp" onclick="showView('lp')">LP Pools</button>
+    <button id="tab-whales" onclick="showView('whales')">🐋 Whales</button>
     <button id="tab-portfolio" onclick="showView('portfolio')">Portfolio <span id="pf-count" class="muted"></span></button>
   </nav>
   <div class="bell" onclick="toggleNotif()">🔔<span id="notif-badge" class="badge hidden">0</span></div>
@@ -463,6 +547,21 @@ PAGE = r"""<!doctype html>
   </tr></thead><tbody id="lp-rows"></tbody></table>
 </div>
 
+<!-- WHALES VIEW -->
+<div id="view-whales" class="hidden">
+  <div class="controls">
+    <label class="ctl"><span class="tip" data-tip="Look-back window (hours) for finding the biggest traders of the hottest token.">Window (hours)</span><input id="wh_hours" type="number" value="6" min="1" max="72" step="1" style="width:70px;"></label>
+    <button id="wh_discover" class="go" onclick="runDiscover()">Discover whales</button>
+    <button class="secbtn" onclick="checkWhalesNow()" id="wh_check">Check tracked now</button>
+  </div>
+  <div id="wh-info">Finds the hottest Robinhood-Chain token (24h volume) and its biggest recent traders. Click <b>Discover whales</b>. Requires an Etherscan API key.</div>
+  <div id="wh-discover-wrap" style="padding:0 24px 10px;"></div>
+  <h3 style="padding:0 24px;color:#8b949e;font-size:13px;text-transform:uppercase;">Tracked wallets</h3>
+  <table><thead><tr>
+    <th>Wallet</th><th>Label</th><th>Added</th><th>Last checked</th><th>Last activity</th><th></th>
+  </tr></thead><tbody id="wh-rows"></tbody></table>
+</div>
+
 <!-- PORTFOLIO VIEW -->
 <div id="view-portfolio" class="hidden">
   <div id="pf-info"></div>
@@ -491,12 +590,74 @@ document.getElementById("auto").addEventListener("change", e => {
 });
 
 function showView(v) {
-  ["scanner","lp","portfolio"].forEach(name => {
+  ["scanner","lp","whales","portfolio"].forEach(name => {
     document.getElementById("view-"+name).classList.toggle("hidden", v !== name);
     document.getElementById("tab-"+name).classList.toggle("active", v === name);
   });
   if (v === "portfolio") loadPortfolio();
   if (v === "lp") loadLpMeta();
+  if (v === "whales") loadWhales();
+}
+
+// ---- whales ----
+function whaleLink(a){ return `<a href="https://robin.etherscan.io/address/${a}" target="_blank" rel="noopener">${a.slice(0,8)}…${a.slice(-6)}</a>`; }
+async function runDiscover() {
+  const btn = document.getElementById("wh_discover");
+  btn.disabled = true; btn.textContent = "Discovering… (~10s)";
+  document.getElementById("wh-info").textContent = "Scanning the hottest token's recent traders…";
+  try {
+    const res = await fetch("/api/whales/discover", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({hours: Number(document.getElementById("wh_hours").value)}) });
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+    renderDiscover(d);
+  } catch (e) { document.getElementById("wh-info").textContent = "Error: " + e.message + (e.message.includes("API_KEY") ? " — set ETHERSCAN_API_KEY in .env." : ""); }
+  finally { btn.disabled = false; btn.textContent = "Discover whales"; }
+}
+function renderDiscover(d) {
+  const ht = d.hot_token;
+  document.getElementById("wh-info").innerHTML =
+    `Hottest token: <b>${ht.symbol}</b> (${ht.pool_symbol}, 24h vol ${fmtTvl(ht.vol24h)}). ` +
+    `Top traders over the last ${d.hours}h (of ${d.traders_seen} seen), ranked by ${ht.symbol} volume:`;
+  const rows = d.wallets.map(w =>
+    `<tr><td>${whaleLink(w.address)}</td>` +
+    `<td class="num">${Number(w.volume).toLocaleString()} ${ht.symbol}</td>` +
+    `<td class="num">${w.tx_count}</td>` +
+    `<td class="muted">${localTime(new Date(w.last_active*1000).toISOString())}</td>` +
+    `<td><button class="addbtn" onclick="trackWhale('${w.address}','${ht.symbol} trader')">★ Track</button></td></tr>`
+  ).join("");
+  document.getElementById("wh-discover-wrap").innerHTML = rows
+    ? `<table><thead><tr><th>Wallet</th><th>Volume (${ht.hours||''})</th><th>Txs</th><th>Last active</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="muted">No non-contract traders found in the window. Try a longer window.</div>`;
+}
+async function trackWhale(addr, label) {
+  await fetch("/api/whales/track", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({address:addr, label}) });
+  loadWhales(); refreshBadges(); alert("Tracking " + addr.slice(0,10) + "… — you'll be alerted on new movements.");
+}
+async function untrackWhale(addr) {
+  await fetch("/api/whales/untrack", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({address:addr}) });
+  loadWhales(); refreshBadges();
+}
+async function checkWhalesNow() {
+  const b = document.getElementById("wh_check"); b.disabled = true; b.textContent = "Checking…";
+  try { await fetch("/api/whales/check", { method:"POST" }); await loadWhales(); refreshBadges(); }
+  finally { b.disabled = false; b.textContent = "Check tracked now"; }
+}
+async function loadWhales() {
+  const d = await fetch("/api/whales").then(r=>r.json());
+  const tb = document.getElementById("wh-rows"); tb.innerHTML = "";
+  if (!d.configured) {
+    tb.innerHTML = `<tr><td colspan="6" class="muted" style="padding:16px 24px;">⚠️ Set <b>ETHERSCAN_API_KEY</b> in .env to enable whale discovery & tracking.</td></tr>`;
+    return;
+  }
+  if (!d.items.length) { tb.innerHTML = `<tr><td colspan="6" class="muted" style="padding:16px 24px;">No wallets tracked yet. Use Discover, then ★ Track.</td></tr>`; return; }
+  d.items.forEach(w => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${whaleLink(w.address)}</td><td class="muted">${w.label||""}</td>` +
+      `<td class="muted">${localTime(w.added_at)}</td><td class="muted">${localTime(w.last_checked)}</td>` +
+      `<td class="warn">${w.last_activity||"—"}</td>` +
+      `<td><button class="secbtn" onclick="untrackWhale('${w.address}')">Untrack</button></td>`;
+    tb.appendChild(tr);
+  });
 }
 
 const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_has_stable","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
@@ -1033,6 +1194,11 @@ class Handler(BaseHTTPRequestHandler):
                 items = NOTIFICATIONS[:50]
                 unread = sum(1 for n in NOTIFICATIONS if not n.get("read"))
             self._send(200, json.dumps({"items": items, "unread": unread}))
+        elif p.path == "/api/whales":
+            with LOCK:
+                items = json.loads(json.dumps(WHALES))
+            self._send(200, json.dumps({"items": items, "configured": whales.configured(),
+                                        "monitor_interval": MONITOR_INTERVAL}))
         elif p.path == "/api/poolchart":
             qs = parse_qs(p.query)
             pid = (qs.get("pool_id") or [""])[0]
@@ -1083,6 +1249,21 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/portfolio/check":
             n = check_all()
             self._send(200, json.dumps({"ok": True, "new_alerts": n}))
+        elif p.path == "/api/whales/discover":
+            try:
+                hours = int(body.get("hours", 6))
+                self._send(200, json.dumps(whales.discover_whales(hours=hours)))
+            except Exception as e:  # noqa: BLE001
+                self._send(500, json.dumps({"error": str(e)}))
+        elif p.path == "/api/whales/track":
+            w = add_whale(body.get("address", ""), body.get("label", ""))
+            self._send(200, json.dumps({"ok": True, "address": w["address"]}))
+        elif p.path == "/api/whales/untrack":
+            remove_whale(body.get("address", ""))
+            self._send(200, json.dumps({"ok": True}))
+        elif p.path == "/api/whales/check":
+            n = whale_check()
+            self._send(200, json.dumps({"ok": True, "moved": n}))
         elif p.path == "/api/portfolio/detail":
             with LOCK:
                 item = next((it for it in PORTFOLIO if it["id"] == body.get("id")), None)

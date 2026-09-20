@@ -13,6 +13,8 @@ services:
       # set these in a .env file next to this compose file (see README).
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      # Etherscan V2 multichain key — enables the Robinhood Chain whale tracker
+      ETHERSCAN_API_KEY: "${ETHERSCAN_API_KEY:-}"
     volumes:
       # Persist the portfolio + notifications across container restarts
       - ./data:/app/data
