@@ -676,7 +676,7 @@ STOCK_VOL = 0.45         # typical single-equity annualized volatility
 # SPX6900 memecoin false positive. Not exhaustive — extend as new tokenized stocks list.
 STOCK_TICKERS = {
     "AAPL", "ABBV", "ABT", "ACN", "AMD", "AMZN", "APP", "AVGO", "AZN", "BAC", "BRKB",
-    "CMCSA", "COIN", "CRCL", "CRM", "CRWD", "CSCO", "DFDV", "DHR", "DIS", "GLD", "GME",
+    "CMCSA", "COIN", "CRCL", "CRM", "CRWD", "CSCO", "DFDV", "DHR", "DIS", "DJT", "GLD", "GME",
     "GOOG", "GOOGL", "HON", "HOOD", "IBM", "INTC", "JNJ", "JPM", "KO", "LIN", "LLY", "MA",
     "MCD", "MDT", "META", "MRK", "MRVL", "MSFT", "MSTR", "MU", "NET", "NFLX", "NKE", "NVDA",
     "NVO", "OPENAI", "ORCL", "PEP", "PFE", "PG", "PLTR", "QQQ", "RDDT", "SGOV", "SHOP",
@@ -703,13 +703,17 @@ def stock_of(leg: str) -> str | None:
 
 
 def is_stock_pool(symbol: str, chain: str = "") -> bool:
-    """A pool includes a tokenized equity if a leg is x-suffixed (any chain), or — only on a
-    dedicated equity chain like Robinhood Chain — a leg is a plain stock ticker. The plain
-    match is chain-gated so memecoins that share a ticker (e.g. GME on Ethereum) aren't caught."""
+    """A pool includes a tokenized equity if:
+      - a leg is an x-suffixed xStock (TSLAx, NVDAx…) — unambiguous on any chain; OR
+      - a leg is a plain stock ticker AND (the pool is on a dedicated equity chain like
+        Robinhood, OR the other leg is a stablecoin).
+    The plain match is gated (stablecoin counter or equity chain) so a memecoin that merely
+    shares a ticker (e.g. GME-WETH on Ethereum) isn't caught, while GOOGL-USDC / META-USDC is."""
     parts = pair_parts(symbol)
     if any(stock_of(p) for p in parts):
         return True
-    if (chain or "").lower() in STOCK_CHAINS:
+    gated = (chain or "").lower() in STOCK_CHAINS or has_stable_leg(symbol)
+    if gated:
         return any(p in STOCK_TICKERS for p in parts)
     return False
 
