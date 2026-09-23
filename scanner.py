@@ -794,6 +794,8 @@ def lp_pool_to_dict(r: dict, reward_discount: float) -> dict:
         "momentum": momentum_label(r.get("apyPct7D")),
         "il_risk": r.get("ilRisk", "no"),
         "is_stock": is_stock_pool(sym, r.get("chain", "")),
+        "verified": not bool(r.get("outlier")),  # DefiLlama did NOT flag the data as an outlier
+        "confidence": (r.get("predictions") or {}).get("binnedConfidence"),
         "url": pool_url(r.get("pool", "")),
     }
 
@@ -811,6 +813,7 @@ def scan_lp(params: dict) -> dict:
     project = params.get("project", "all")       # DEX/protocol, e.g. uniswap-v3
     asset_kind = params.get("asset_kind", "all")  # all | stocks
     require_stable = bool(params.get("has_stable", False))  # require ≥1 stablecoin leg
+    verified_only = bool(params.get("verified_only", False))  # exclude DefiLlama-flagged outliers
     min_age = params.get("min_pool_age", 0)
     limit = params.get("limit", 40)
     max_apy = params.get("max_apy", 2000.0)      # drop obvious junk only
@@ -821,6 +824,8 @@ def scan_lp(params: dict) -> dict:
         if r.get("exposure") != "multi":
             continue
         if len(pair_parts(r.get("symbol"))) < 2:
+            continue
+        if verified_only and r.get("outlier"):
             continue
         n_lp += 1
         d = lp_pool_to_dict(r, rd)

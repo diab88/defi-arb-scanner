@@ -526,6 +526,8 @@ PAGE = r"""<!doctype html>
       <select id="lp_asset_kind"><option value="all">all</option><option value="stocks">tokenized stocks 📈</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Require at least one leg to be a stablecoin (USDC/USDT/USDG/DAI…). This is 'a stablecoin is one side of the pair' — different from Pair type = stablecoin, which needs BOTH legs stable.">Stablecoin leg</span>
       <select id="lp_has_stable"><option value="0">any</option><option value="1">required</option></select></label>
+    <label class="ctl"><span class="tip" data-tip="DefiLlama data quality. 'verified only' excludes pools DefiLlama flags as outliers (suspect/unreliable APY or TVL data). Note: this is DefiLlama's own data-quality flag, not a formal audit.">DefiLlama</span>
+      <select id="lp_verified_only"><option value="0">all</option><option value="1">verified only ✓</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Pair type by impermanent-loss risk. stable = stablecoin pairs (near-zero IL); correlated = same-class incl. LSTs (low IL); exclude volatile = drop volatile-volatile pairs.">Pair type</span>
       <select id="lp_pair_type"><option value="all">all</option><option value="stable">stablecoin</option><option value="correlated">correlated (low IL)</option><option value="exclude_volatile">exclude volatile-volatile</option></select></label>
     <label class="ctl"><span class="tip" data-tip="Only pairs whose symbol contains this token, e.g. WETH or TSLAX.">Token contains</span><input id="lp_token" type="text" value="" placeholder="e.g. TSLAX" style="width:90px;"></label>
@@ -660,7 +662,7 @@ async function loadWhales() {
   });
 }
 
-const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_has_stable","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
+const LP_IDS = ["lp_min_net_apy","lp_min_tvl","lp_min_vol7d","lp_min_vol_tvl","lp_chain","lp_project","lp_asset_kind","lp_has_stable","lp_verified_only","lp_pair_type","lp_token","lp_min_pool_age","lp_limit"];
 let lpMetaLoaded = false;
 async function loadLpMeta() {
   if (lpMetaLoaded) return;
@@ -710,7 +712,7 @@ function renderLp(data) {
       `<td class="muted">${p.is_stock ? '📈 ' : ''}${p.pair_type}</td>` +
       `<td class="num muted">${fmtAge(p.age_days)}</td>` +
       `<td>${momArrow(p.momentum)}</td>` +
-      `<td>${link(p.project+"/"+p.chain+" "+p.symbol, p.url)}</td>`;
+      `<td>${p.verified ? '<span title="Not flagged as an outlier by DefiLlama" style="color:#3fb950">✓</span> ' : '<span title="DefiLlama flagged this pool as an outlier (suspect data)" style="color:#f85149">⚠</span> '}${link(p.project+"/"+p.chain+" "+p.symbol, p.url)}</td>`;
     tb.appendChild(tr);
   });
 }
@@ -1139,6 +1141,7 @@ def lp_params_from_query(qs: dict) -> dict:
         "project": g("project", str, "all"),
         "asset_kind": g("asset_kind", str, "all"),
         "has_stable": g("has_stable", lambda v: v == "1", False),
+        "verified_only": g("verified_only", lambda v: v == "1", False),
         "min_pool_age": g("min_pool_age", int, 0),
         "limit": g("limit", int, 40),
         "reward_discount": g("reward_discount", float, 0.5),
